@@ -1,25 +1,22 @@
 
-from datetime import datetime, timezone
+
+from datetime import datetime, timezone, time as datetime_time
+from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
 
 from pulsecore.applications.wardpulse.demo_data import create_demo_engine
 from pulsecore.applications.wardpulse.service import WardPulseSurveillance
+from pulsecore.domain.models import Observation
 
-from pathlib import Path
-import tempfile
 
-from pulsecore.applications.wardpulse.ingestion import (
-    WardPulseIngestionService,
-)
-
-# --------------------------------------------------
+# ==========================================================
 # PAGE CONFIGURATION
-# --------------------------------------------------
+# ==========================================================
 
 st.set_page_config(
-    page_title="WardPulse | Early Warning",
+    page_title="WardPulse | Workforce Early Warning",
     page_icon="🏥",
     layout="wide",
 )
@@ -30,145 +27,327 @@ st.caption(
 )
 
 
-# --------------------------------------------------
-# INITIALIZE THE APPLICATION
-# --------------------------------------------------
+# ==========================================================
+# REPORTING PERIODS
+# ==========================================================
 
-def initialize_application():
-    engine = create_demo_engine()
-    service = WardPulseSurveillance(engine)
-    ingestion_service = WardPulseIngestionService(engine)
-    st.session_state.ingestion_service = ingestion_service
+# These dates match the synthetic demonstration dataset.
+# New observations can be entered up to the current date.
 
-    report = service.run(
-        baseline_start=datetime(
-            2026, 10, 25, tzinfo=timezone.utc
-        ),
-        baseline_end=datetime(
-            2026, 10, 31, 23, 59, tzinfo=timezone.utc
-        ),
-        current_start=datetime(
-            2026, 11, 1, tzinfo=timezone.utc
-        ),
-        current_end=datetime(
-            2026, 11, 7, 23, 59, tzinfo=timezone.utc
-        ),
+BASELINE_START = datetime(
+    2026, 10, 25, tzinfo=timezone.utc
+)
+
+BASELINE_END = datetime(
+    2026, 10, 31, 23, 59, 59,
+    tzinfo=timezone.utc,
+)
+
+CURRENT_START = datetime(
+    2026, 11, 1, tzinfo=timezone.utc
+)
+
+
+def get_current_period_end():
+    today = datetime.now(timezone.utc).date()
+
+    return datetime.combine(
+        today,
+        datetime_time(23, 59, 59),
+        tzinfo=timezone.utc,
     )
 
-    st.session_state.engine = engine
-    st.session_state.service = service
+
+# ==========================================================
+# APPLICATION INITIALISATION
+# ==========================================================
+
+def refresh_surveillance():
+    """Recalculate WardPulse results using current observations."""
+
+    report = st.session_state.service.run(
+        baseline_start=BASELINE_START,
+        baseline_end=BASELINE_END,
+        current_start=CURRENT_START,
+        current_end=get_current_period_end(),
+    )
+
     st.session_state.report = report
 
 
-if "report" not in st.session_state:
+def initialize_application():
+    """Create the demonstration engine and surveillance service."""
+
+    engine = create_demo_engine()
+    service = WardPulseSurveillance(engine)
+
+    st.session_state.engine = engine
+    st.session_state.service = service
+
+    refresh_surveillance()
+
+
+if "engine" not in st.session_state:
     initialize_application()
+
 
 engine = st.session_state.engine
 service = st.session_state.service
 report = st.session_state.report
 
 
-# --------------------------------------------------
-# SIDEBAR
-# --------------------------------------------------
+# ==========================================================
+# COMMON HELPER FUNCTIONS
+# ==========================================================
 
-st.sidebar.title("WardPulse Navigation")
+def get_risk_level(assessment):
+    level = assessment.risk_level
+    return getattr(level, "value", str(level)).upper()
 
-page = st.sidebar.radio(
-    "Select a view",
-    [
-        "Overview",
-        "Department Analysis",
-        "Alerts and Recommendations",
-        "Action Tracking",
-        "Data Ingestion",
-    ],
-)
 
-st.sidebar.divider()
+def get_enum_value(value):
+    return getattr(value, "value", str(value))
 
-st.sidebar.caption("Reporting periods")
-st.sidebar.write("Baseline: 25–31 October 2026")
-st.sidebar.write("Current: 1–7 November 2026")
 
-st.sidebar.divider()
-
-if st.sidebar.button("Refresh surveillance report"):
-
-    st.session_state.report = service.run(
-        baseline_start=datetime(
-            2026, 10, 25, tzinfo=timezone.utc
+def get_department_report(department_id):
+    return next(
+        (
+            item
+            for item in report.departments
+            if item.entity_id == department_id
         ),
-        baseline_end=datetime(
-            2026, 10, 31, 23, 59, tzinfo=timezone.utc
-        ),
-        current_start=datetime(
-            2026, 11, 1, tzinfo=timezone.utc
-        ),
-        current_end=datetime(
-            2026, 11, 7, 23, 59, tzinfo=timezone.utc
-        ),
+        None,
     )
 
-    st.success("Surveillance report recalculated.")
 
-    st.rerun()
-
-st.sidebar.caption(
-    "Demonstration environment · Synthetic data"
-)
-
-
-# --------------------------------------------------
-# COMMON DATA
-# --------------------------------------------------
-
-departments = report.departments
-
-total_alerts = sum(
-    len(department.alerts)
-    for department in departments
-)
-
-high_risk_departments = sum(
-    department.assessment.risk_level.value
-    in ["high", "critical"]
-    for department in departments
-)
-
-all_actions = engine.get_actions()
-
-pending_actions = sum(
-    action.status == "pending"
-    for action in all_actions
-)
-
-
-def risk_label(level):
-    return level.value.upper()
+def get_department_name(department_id):
+    department = engine.get_entity(department_id)
+    return department.name
 
 
 def get_action_for_recommendation(recommendation_id):
     return next(
         (
-            action for action in engine.get_actions()
+            action
+            for action in engine.get_actions()
             if action.recommendation_id == recommendation_id
         ),
         None,
     )
 
 
-# --------------------------------------------------
-# OVERVIEW
-# --------------------------------------------------
+def display_alert(alert):
+    severity = get_enum_value(alert.severity).upper()
 
-if page == "Overview":
+    st.warning(
+        f"**{severity}** — {alert.message}"
+    )
 
-    st.header("Surveillance Overview")
+
+def display_recommendations(department_result):
+    if not department_result.recommendations:
+        st.info("No recommendations currently available.")
+        return
+
+    for recommendation in department_result.recommendations:
+
+        priority = get_enum_value(
+            recommendation.priority
+        ).upper()
+
+        st.markdown(
+            f"**{priority} priority**"
+        )
+
+        st.write(recommendation.description)
+
+        existing_action = get_action_for_recommendation(
+            recommendation.id
+        )
+
+        if existing_action:
+            st.caption(
+                "Action status: "
+                + existing_action.status.replace(
+                    "_", " "
+                ).title()
+            )
+
+        else:
+            if st.button(
+                "Create tracked action",
+                key=f"create_action_{recommendation.id}",
+            ):
+                service.create_action(
+                    recommendation_id=recommendation.id
+                )
+
+                st.success("Action created.")
+                st.rerun()
+
+        st.divider()
+
+
+def get_department_summary():
+    rows = []
+
+    for item in report.departments:
+
+        rows.append({
+            "Department": get_department_name(
+                item.entity_id
+            ),
+            "Risk level": get_risk_level(
+                item.assessment
+            ),
+            "Alerts": item.assessment.alert_count,
+            "Signal categories": ", ".join(
+                item.assessment.signal_categories
+            ) or "None",
+        })
+
+    return pd.DataFrame(rows)
+
+
+def get_indicator_dataframe(department_result):
+    rows = []
+
+    for result in department_result.analytics:
+
+        rows.append({
+            "Indicator": result.indicator_name,
+            "Baseline": result.baseline.value,
+            "Current": result.current.value,
+            "Change": result.absolute_deviation,
+            "Change (%)": result.percentage_deviation,
+            "Trend": result.trend.replace(
+                "_", " "
+            ).title(),
+            "Status": result.status.replace(
+                "_", " "
+            ).title(),
+        })
+
+    return pd.DataFrame(rows)
+
+
+# ==========================================================
+# SIDEBAR: WORKSPACE SELECTOR
+# ==========================================================
+
+st.sidebar.title("WardPulse")
+
+st.sidebar.caption("Demonstration workspace")
+
+workspace = st.sidebar.selectbox(
+    "Select workspace",
+    [
+        "Executive Dashboard",
+        "Department Manager Dashboard",
+    ],
+    key="workspace_selector",
+)
+
+st.sidebar.divider()
+
+departments = engine.list_entities(
+    entity_type="department"
+)
+
+department_names = {
+    department.id: department.name
+    for department in departments
+}
+
+department_ids = list(department_names.keys())
+
+
+# Department selection is available for the demonstration.
+# Future authentication will restrict this to assigned departments.
+
+if workspace == "Department Manager Dashboard":
+
+    selected_department_id = st.sidebar.selectbox(
+        "Select department",
+        department_ids,
+        format_func=lambda department_id: (
+            department_names[department_id]
+        ),
+        key="manager_department",
+    )
+
+else:
+    selected_department_id = None
+
+
+st.sidebar.divider()
+
+st.sidebar.caption("Reporting periods")
+
+st.sidebar.write(
+    "Baseline: 25–31 October 2026"
+)
+
+st.sidebar.write(
+    f"Current: 1 November – "
+    f"{get_current_period_end().strftime('%d %B %Y')}"
+)
+
+st.sidebar.divider()
+
+if st.sidebar.button(
+    "Refresh surveillance results",
+    use_container_width=True,
+):
+    refresh_surveillance()
+    st.rerun()
+
+if st.sidebar.button(
+    "Reset demonstration data",
+    use_container_width=True,
+):
+    initialize_application()
+    st.rerun()
+
+st.sidebar.caption(
+    "Demonstration environment · Synthetic data"
+)
+
+st.sidebar.caption(
+    "Workspace selection is not authentication "
+    "or an access-control mechanism."
+)
+
+
+# ==========================================================
+# EXECUTIVE DASHBOARD
+# ==========================================================
+
+def executive_dashboard():
+
+    st.header("Executive Dashboard")
 
     st.caption(
-        "Aggregated monitoring of workforce, clinical, "
-        "environmental and workplace safety signals."
+        "Facility-wide overview of workforce and "
+        "operational conditions."
+    )
+
+    total_alerts = sum(
+        len(item.alerts)
+        for item in report.departments
+    )
+
+    elevated_departments = sum(
+        get_risk_level(item.assessment)
+        in ["HIGH", "CRITICAL"]
+        for item in report.departments
+    )
+
+    all_actions = engine.get_actions()
+
+    pending_actions = sum(
+        action.status == "pending"
+        for action in all_actions
     )
 
     col1, col2, col3, col4 = st.columns(4)
@@ -185,7 +364,7 @@ if page == "Overview":
 
     col3.metric(
         "Elevated-risk departments",
-        high_risk_departments,
+        elevated_departments,
     )
 
     col4.metric(
@@ -195,91 +374,121 @@ if page == "Overview":
 
     st.divider()
 
-    st.subheader("Departmental Risk Summary")
+    st.subheader("Departmental Risk Overview")
 
-    risk_data = []
-
-    for department in departments:
-        risk_data.append({
-            "Department": department.entity_id,
-            "Risk level": risk_label(
-                department.assessment.risk_level
-            ),
-            "Alerts": department.assessment.alert_count,
-            "Signal categories": ", ".join(
-                department.assessment.signal_categories
-            ) or "None",
-        })
+    summary = get_department_summary()
 
     st.dataframe(
-        pd.DataFrame(risk_data),
+        summary,
         use_container_width=True,
         hide_index=True,
     )
 
-    st.subheader("Risk Findings")
+    st.divider()
 
-    for department in departments:
-        assessment = department.assessment
+    st.subheader("Departments Requiring Attention")
 
-        with st.expander(
-            f"{department.entity_id} — "
-            f"{risk_label(assessment.risk_level)} risk"
-        ):
-            st.write(assessment.summary)
+    attention_needed = [
+        item
+        for item in report.departments
+        if get_risk_level(item.assessment)
+        in ["HIGH", "CRITICAL"]
+    ]
 
-            if department.alerts:
-                for alert in department.alerts:
-                    st.warning(
-                        f"**{alert.severity.value.upper()}** — "
-                        f"{alert.message}"
-                    )
-            else:
-                st.success(
-                    "No configured risk thresholds were exceeded."
+    if not attention_needed:
+        st.success(
+            "No departments currently meet the "
+            "configured elevated-risk conditions."
+        )
+
+    else:
+        for item in attention_needed:
+
+            department_name = get_department_name(
+                item.entity_id
+            )
+
+            with st.expander(
+                f"{department_name} — "
+                f"{get_risk_level(item.assessment)}"
+            ):
+
+                st.write(item.assessment.summary)
+
+                st.write(
+                    f"Alerts: {item.assessment.alert_count}"
                 )
+
+                if item.alerts:
+                    for alert in item.alerts:
+                        display_alert(alert)
+
+                st.markdown("**Recommendations**")
+                display_recommendations(item)
 
     st.divider()
 
-    st.subheader("Surveillance Interpretation")
+    st.subheader("Action Progress")
 
-    st.info(
-        "An alert indicates that a configured threshold was exceeded. "
-        "It is an early-warning signal requiring review, not proof "
-        "of an outbreak, occupational illness or causal relationship."
-    )
+    actions = engine.get_actions()
+
+    if not actions:
+        st.info(
+            "No operational actions have been created yet."
+        )
+
+    else:
+        action_data = []
+
+        for action in actions:
+            action_data.append({
+                "Department": get_department_name(
+                    action.entity_id
+                ),
+                "Action": action.description,
+                "Assigned to": action.assigned_to or "Unassigned",
+                "Status": action.status.replace(
+                    "_", " "
+                ).title(),
+            })
+
+        st.dataframe(
+            pd.DataFrame(action_data),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 
-# --------------------------------------------------
-# DEPARTMENT ANALYSIS
-# --------------------------------------------------
+# ==========================================================
+# EXECUTIVE DEPARTMENT ANALYSIS
+# ==========================================================
 
-elif page == "Department Analysis":
+def executive_department_analysis():
 
     st.header("Department Analysis")
-
-    department_ids = [
-        department.entity_id
-        for department in departments
-    ]
 
     selected_id = st.selectbox(
         "Select department",
         department_ids,
+        format_func=lambda department_id: (
+            department_names[department_id]
+        ),
+        key="executive_analysis_department",
     )
 
-    selected = next(
-        department for department in departments
-        if department.entity_id == selected_id
-    )
+    selected = get_department_report(selected_id)
 
-    st.subheader(selected_id)
+    if selected is None:
+        st.warning("No surveillance results available.")
+        return
+
+    st.subheader(department_names[selected_id])
 
     col1, col2, col3 = st.columns(3)
 
     col1.metric(
         "Risk level",
-        risk_label(selected.assessment.risk_level),
+        get_risk_level(selected.assessment),
     )
 
     col2.metric(
@@ -298,20 +507,7 @@ elif page == "Department Analysis":
 
     st.subheader("Indicator Comparisons")
 
-    analytics_data = []
-
-    for result in selected.analytics:
-        analytics_data.append({
-            "Indicator": result.indicator_name,
-            "Baseline": result.baseline.value,
-            "Current": result.current.value,
-            "Change": result.absolute_deviation,
-            "Change (%)": result.percentage_deviation,
-            "Trend": result.trend,
-            "Status": result.status,
-        })
-
-    analytics_df = pd.DataFrame(analytics_data)
+    analytics_df = get_indicator_dataframe(selected)
 
     st.dataframe(
         analytics_df,
@@ -319,18 +515,21 @@ elif page == "Department Analysis":
         hide_index=True,
     )
 
-    st.subheader("Baseline vs Current Values")
+    numeric_chart = analytics_df[
+        ["Indicator", "Baseline", "Current"]
+    ].copy()
 
-    chart_data = analytics_df.set_index("Indicator")[
-        ["Baseline", "Current"]
-    ]
-
-    st.bar_chart(chart_data)
-
-    st.caption(
-        "Values are aggregated according to each indicator's "
-        "configured calculation method."
+    numeric_chart = numeric_chart.dropna(
+        subset=["Baseline", "Current"]
     )
+
+    if not numeric_chart.empty:
+
+        st.subheader("Baseline vs Current Values")
+
+        st.bar_chart(
+            numeric_chart.set_index("Indicator")
+        )
 
     st.divider()
 
@@ -338,333 +537,562 @@ elif page == "Department Analysis":
 
     if selected.alerts:
         for alert in selected.alerts:
-            st.warning(
-                f"**{alert.severity.value.upper()}** — {alert.message}"
-            )
+            display_alert(alert)
     else:
-        st.success("No alerts were triggered for this department.")
+        st.success(
+            "No configured alerts were triggered."
+        )
+
+    st.divider()
+
+    st.subheader("Recommendations")
+
+    display_recommendations(selected)
 
 
-# --------------------------------------------------
-# ALERTS AND RECOMMENDATIONS
-# --------------------------------------------------
+# ==========================================================
+# DEPARTMENT MANAGER DASHBOARD
+# ==========================================================
 
-elif page == "Alerts and Recommendations":
+def manager_dashboard():
 
-    st.header("Alerts and Preventive Recommendations")
+    department_id = selected_department_id
 
-    for department in departments:
+    department_name = department_names[department_id]
 
-        st.subheader(department.entity_id)
+    selected = get_department_report(department_id)
 
-        if not department.alerts:
-            st.success("No configured alerts.")
-        else:
-            for alert in department.alerts:
-                st.warning(
-                    f"**{alert.severity.value.upper()}** — "
-                    f"{alert.message}"
-                )
-
-        st.markdown("**Recommended preventive actions**")
-
-        if not department.recommendations:
-            st.write("No recommendations generated.")
-        else:
-            for recommendation in department.recommendations:
-                with st.container(border=True):
-                    st.markdown(f"**{recommendation.title}**")
-                    st.write(recommendation.description)
-                    st.caption(
-                        f"Priority: {recommendation.priority.value.upper()}"
-                    )
-                    st.caption(
-                        f"Rationale: {recommendation.rationale}"
-                    )
-
-
-# --------------------------------------------------
-# ACTION TRACKING
-# --------------------------------------------------
-
-elif page == "Action Tracking":
-
-    st.header("Operational Action Tracking")
+    st.header("Department Manager Dashboard")
 
     st.caption(
-        "Convert preventive recommendations into assigned "
-        "and trackable operational tasks."
+        f"Operational workspace · {department_name}"
     )
 
-    recommendations = engine.get_recommendations()
+    if selected is None:
+        st.warning(
+            "No surveillance results are available "
+            "for this department."
+        )
+        return
 
-    if not recommendations:
-        st.info("There are currently no recommendations.")
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric(
+        "Department risk level",
+        get_risk_level(selected.assessment),
+    )
+
+    col2.metric(
+        "Active alerts",
+        selected.assessment.alert_count,
+    )
+
+    col3.metric(
+        "Recommendations",
+        len(selected.recommendations),
+    )
+
+    st.divider()
+
+    st.subheader("Department Status")
+
+    st.write(selected.assessment.summary)
+
+    st.divider()
+
+    st.subheader("Your Departmental Indicators")
+
+    analytics_df = get_indicator_dataframe(selected)
+
+    st.dataframe(
+        analytics_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    numeric_chart = analytics_df[
+        ["Indicator", "Baseline", "Current"]
+    ].dropna(
+        subset=["Baseline", "Current"]
+    )
+
+    if not numeric_chart.empty:
+
+        st.subheader("Indicator Trends")
+
+        st.bar_chart(
+            numeric_chart.set_index("Indicator")
+        )
+
+    st.divider()
+
+    st.subheader("Alerts Requiring Review")
+
+    if selected.alerts:
+
+        for alert in selected.alerts:
+            display_alert(alert)
+
     else:
-        for recommendation in recommendations:
+        st.success(
+            "No configured alerts for this department."
+        )
 
-            action = get_action_for_recommendation(
-                recommendation.id
+    st.divider()
+
+    st.subheader("Recommended Follow-up")
+
+    display_recommendations(selected)
+
+
+# ==========================================================
+# MANAGER OBSERVATION ENTRY
+# ==========================================================
+
+def record_observation_page():
+
+    department_id = selected_department_id
+
+    department_name = department_names[department_id]
+
+    st.header("Record Department Observation")
+
+    st.caption(
+        f"Submit an operational observation for "
+        f"{department_name}."
+    )
+
+    metric_options = {
+        "Staff Absence": {
+            "metric": "staff_absence_count",
+            "unit": "staff absences",
+            "category": "workforce",
+        },
+        "Staff Overtime": {
+            "metric": "overtime_hours",
+            "unit": "hours",
+            "category": "workforce",
+        },
+        "Respiratory Cases": {
+            "metric": "respiratory_case_count",
+            "unit": "cases",
+            "category": "clinical_service",
+        },
+        "Air Quality Index": {
+            "metric": "air_quality_index",
+            "unit": "index",
+            "category": "environmental",
+        },
+        "Occupational Incidents": {
+            "metric": "occupational_incident_count",
+            "unit": "incidents",
+            "category": "workplace_safety",
+        },
+    }
+
+    st.info(
+        "Enter an observation using one reporting interval "
+        "consistently. Avoid mixing shift totals, daily totals "
+        "and weekly totals for the same metric, as this may "
+        "distort aggregate calculations."
+    )
+
+    with st.form("department_observation_form"):
+
+        observation_date = st.date_input(
+            "Observation date",
+            value=datetime.now(timezone.utc).date(),
+            max_value=datetime.now(timezone.utc).date(),
+        )
+
+        reporting_interval = st.selectbox(
+            "Reporting interval",
+            [
+                "Shift",
+                "Daily",
+                "Weekly summary",
+            ],
+        )
+
+        shift = "Not applicable"
+
+        if reporting_interval == "Shift":
+
+            shift = st.selectbox(
+                "Shift",
+                [
+                    "Morning",
+                    "Afternoon",
+                    "Night",
+                ],
             )
 
-            with st.container(border=True):
+        metric_label = st.selectbox(
+            "Observation category / metric",
+            list(metric_options.keys()),
+        )
 
-                st.markdown(f"**{recommendation.title}**")
-                st.write(recommendation.description)
+        metric_details = metric_options[metric_label]
 
-                st.caption(
-                    f"Department: {recommendation.entity_id}"
+        st.caption(
+            f"Unit: {metric_details['unit']}"
+        )
+
+        observation_value = st.number_input(
+            "Observed value",
+            min_value=0.0,
+            value=0.0,
+            step=1.0,
+        )
+
+        observation_note = st.text_area(
+            "Contextual note (optional)",
+            placeholder=(
+                "Add relevant operational context..."
+            ),
+        )
+
+        submitted = st.form_submit_button(
+            "Submit observation",
+            use_container_width=True,
+        )
+
+    if submitted:
+
+        if observation_value < 0:
+            st.error(
+                "Observation value cannot be negative."
+            )
+            return
+
+        observed_at = datetime.combine(
+            observation_date,
+            datetime_time(12, 0),
+            tzinfo=timezone.utc,
+        )
+
+        observation = Observation(
+            id=f"MANUAL-{uuid4().hex[:12]}",
+            entity_id=department_id,
+            metric=metric_details["metric"],
+            value=observation_value,
+            unit=metric_details["unit"],
+            source="department_manager_entry",
+            observed_at=observed_at,
+            metadata={
+                "reporting_interval": reporting_interval,
+                "shift": shift,
+                "category": metric_details["category"],
+                "note": observation_note,
+                "synthetic": True,
+                "entered_via": "manager_dashboard",
+            },
+        )
+
+        try:
+
+            engine.record_observation(observation)
+
+            refresh_surveillance()
+
+            st.success(
+                "Observation recorded and surveillance "
+                "results recalculated."
+            )
+
+            st.rerun()
+
+        except Exception as error:
+
+            st.error(
+                f"Could not record observation: {error}"
+            )
+
+    st.divider()
+
+    st.subheader("Recent Department Observations")
+
+    observations = engine.get_observations(
+        entity_id=department_id
+    )
+
+    observations = sorted(
+        observations,
+        key=lambda item: item.observed_at,
+        reverse=True,
+    )
+
+    recent_data = []
+
+    for item in observations[:15]:
+
+        recent_data.append({
+            "Date": item.observed_at.strftime(
+                "%d %b %Y"
+            ),
+            "Metric": item.metric.replace(
+                "_", " "
+            ).title(),
+            "Value": item.value,
+            "Unit": item.unit or "",
+            "Source": item.source or "Demo data",
+        })
+
+    if recent_data:
+
+        st.dataframe(
+            pd.DataFrame(recent_data),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    else:
+        st.info("No observations recorded yet.")
+
+
+# ==========================================================
+# ALERTS AND RECOMMENDATIONS
+# ==========================================================
+
+def alerts_and_recommendations_page(
+    department_filter=None
+):
+
+    st.header("Alerts and Recommendations")
+
+    departments_to_display = report.departments
+
+    if department_filter:
+
+        departments_to_display = [
+            item
+            for item in departments_to_display
+            if item.entity_id == department_filter
+        ]
+
+    for item in departments_to_display:
+
+        department_name = get_department_name(
+            item.entity_id
+        )
+
+        st.subheader(department_name)
+
+        if not item.alerts:
+
+            st.success(
+                "No configured alerts for this department."
+            )
+
+        else:
+
+            for alert in item.alerts:
+                display_alert(alert)
+
+        st.markdown("**Recommendations**")
+
+        display_recommendations(item)
+
+        st.divider()
+
+
+# ==========================================================
+# ACTION TRACKING
+# ==========================================================
+
+def action_tracking_page(department_filter=None):
+
+    st.header("Action Tracking")
+
+    actions = engine.get_actions()
+
+    if department_filter:
+
+        actions = [
+            action
+            for action in actions
+            if action.entity_id == department_filter
+        ]
+
+    if not actions:
+
+        st.info(
+            "No tracked actions are currently available. "
+            "Create an action from a recommendation."
+        )
+
+        return
+
+    for action in actions:
+
+        department_name = get_department_name(
+            action.entity_id
+        )
+
+        with st.expander(
+            f"{department_name} — "
+            f"{action.status.replace('_', ' ').title()}"
+        ):
+
+            st.write(action.description)
+
+            st.write(
+                f"**Assigned to:** "
+                f"{action.assigned_to or 'Unassigned'}"
+            )
+
+            st.write(
+                f"**Current status:** "
+                f"{action.status.replace('_', ' ').title()}"
+            )
+
+            statuses = [
+                "pending",
+                "in_progress",
+                "completed",
+                "cancelled",
+            ]
+
+            selected_status = st.selectbox(
+                "Update action status",
+                statuses,
+                index=statuses.index(action.status),
+                key=f"status_{action.id}",
+            )
+
+            if st.button(
+                "Save status",
+                key=f"save_status_{action.id}",
+            ):
+
+                engine.update_action_status(
+                    action.id,
+                    selected_status,
                 )
 
-                if action is None:
+                st.success(
+                    "Action status updated."
+                )
 
-                    assignee = st.text_input(
-                        "Assign to",
-                        key=f"assignee_{recommendation.id}",
-                        placeholder="e.g. Department Manager",
-                    )
-
-                    if st.button(
-                        "Create operational action",
-                        key=f"create_{recommendation.id}",
-                    ):
-                        service.create_action(
-                            recommendation_id=recommendation.id,
-                            assigned_to=assignee.strip() or None,
-                        )
-                        st.success("Action created.")
-                        st.rerun()
-
-                else:
-
-                    st.write(
-                        f"**Assigned to:** "
-                        f"{action.assigned_to or 'Unassigned'}"
-                    )
-
-                    st.write(
-                        f"**Current status:** "
-                        f"{action.status.replace('_', ' ').title()}"
-                    )
-
-                    statuses = [
-                        "pending",
-                        "in_progress",
-                        "completed",
-                        "cancelled",
-                    ]
-
-                    selected_status = st.selectbox(
-                        "Update action status",
-                        statuses,
-                        index=statuses.index(action.status),
-                        key=f"status_{action.id}",
-                    )
-
-                    if st.button(
-                        "Save status",
-                        key=f"save_{action.id}",
-                    ):
-                        engine.update_action_status(
-                            action.id,
-                            selected_status,
-                        )
-                        st.success("Action status updated.")
-                        st.rerun()
+                st.rerun()
 
     st.divider()
 
     st.subheader("Action Summary")
 
-    actions = engine.get_actions()
+    all_actions = (
+        engine.get_actions()
+        if department_filter is None
+        else [
+            action
+            for action in engine.get_actions()
+            if action.entity_id == department_filter
+        ]
+    )
 
     action_summary = {
         "Pending": sum(
-            action.status == "pending" for action in actions
+            action.status == "pending"
+            for action in all_actions
         ),
         "In progress": sum(
-            action.status == "in_progress" for action in actions
+            action.status == "in_progress"
+            for action in all_actions
         ),
         "Completed": sum(
-            action.status == "completed" for action in actions
+            action.status == "completed"
+            for action in all_actions
         ),
         "Cancelled": sum(
-            action.status == "cancelled" for action in actions
+            action.status == "cancelled"
+            for action in all_actions
         ),
     }
 
     st.dataframe(
-        pd.DataFrame(
-            [
-                {"Status": status, "Actions": count}
-                for status, count in action_summary.items()
-            ]
-        ),
+        pd.DataFrame([
+            {
+                "Status": status,
+                "Actions": count,
+            }
+            for status, count in action_summary.items()
+        ]),
         use_container_width=True,
         hide_index=True,
     )
 
 
-# --------------------------------------------------
-# DATA INGESTION
-# --------------------------------------------------
-elif page == "Data Ingestion":
-    st.header("Dataset Ingestion")
-    st.caption(
-        "Import departmental observations or shift records "
-        "from validated CSV and Excel files."
-    )
+# ==========================================================
+# WORKSPACE NAVIGATION
+# ==========================================================
 
-    ingestion_type = st.selectbox(
-        "Dataset type",
+if workspace == "Executive Dashboard":
+
+    page = st.sidebar.radio(
+        "Executive navigation",
         [
-            "Departmental observations",
-            "Shift records",
+            "Overview",
+            "Department Analysis",
+            "Alerts & Recommendations",
+            "Action Tracking",
         ],
+        key="executive_navigation",
     )
 
-    uploaded_file = st.file_uploader(
-        "Upload CSV or Excel file",
-        type=["csv", "xlsx"],
+    if page == "Overview":
+        executive_dashboard()
+
+    elif page == "Department Analysis":
+        executive_department_analysis()
+
+    elif page == "Alerts & Recommendations":
+        alerts_and_recommendations_page()
+
+    elif page == "Action Tracking":
+        action_tracking_page()
+
+
+else:
+
+    page = st.sidebar.radio(
+        "Manager navigation",
+        [
+            "My Department",
+            "Record Observation",
+            "Alerts & Recommendations",
+            "Action Tracking",
+        ],
+        key="manager_navigation",
     )
 
-    if uploaded_file is not None:
-        st.write(f"**Selected file:** {uploaded_file.name}")
+    if page == "My Department":
+        manager_dashboard()
 
-        if st.button("Validate and import dataset"):
-            suffix = Path(uploaded_file.name).suffix
+    elif page == "Record Observation":
+        record_observation_page()
 
-            temporary_path = None
-
-            try:
-                with tempfile.NamedTemporaryFile(
-                    delete=False,
-                    suffix=suffix,
-                ) as temporary_file:
-                    temporary_file.write(uploaded_file.getvalue())
-                    temporary_path = Path(temporary_file.name)
-
-                ingestion_service = (
-                    st.session_state.ingestion_service
-                )
-
-                if ingestion_type == "Departmental observations":
-                    result = (
-                        ingestion_service
-                        .ingest_departmental_observations(
-                            temporary_path
-                        )
-                    )
-                else:
-                    result = (
-                        ingestion_service
-                        .ingest_shift_records(
-                            temporary_path
-                        )
-                    )
-
-                st.session_state.last_ingestion = result
-
-                st.success(
-                    f"Stored {result.stored_count} observations."
-                )
-
-                if result.validation:
-                    validation_result = result.validation.result
-
-                    st.write("**Validation summary**")
-                    st.json({
-                        "valid": validation_result.valid,
-                        "total_rows": validation_result.total_rows,
-                        "accepted_rows": validation_result.accepted_rows,
-                        "rejected_rows": validation_result.rejected_rows,
-                    })
-
-                    if validation_result.issues:
-                        st.warning("Validation issues")
-                        st.dataframe([
-                            issue.model_dump()
-                            for issue in validation_result.issues
-                        ])
-
-                if result.linking:
-                    st.write("**Entity linking**")
-                    st.write(
-                        f"Linked: {result.linking.linked_count}"
-                    )
-                    st.write(
-                        f"Unmatched: {result.linking.unmatched_count}"
-                    )
-
-                    if result.linking.issues:
-                        st.dataframe([
-                            issue.__dict__
-                            for issue in result.linking.issues
-                        ])
-
-                if result.generation:
-                    st.write("**Observation generation**")
-                    st.write(
-                        f"Generated: {result.generation.generated_count}"
-                    )
-
-                    if result.generation.issues:
-                        st.dataframe([
-                            issue.__dict__
-                            for issue in result.generation.issues
-                        ])
-
-                if result.storage_issues:
-                    st.error("Some observations could not be stored.")
-                    st.dataframe([
-                        issue.__dict__
-                        for issue in result.storage_issues
-                    ])
-
-                if result.stored_count:
-                    st.info(
-                        "The imported observations are now in the "
-                        "current in-memory PulseCore engine. Rerun "
-                        "surveillance to update the report."
-                    )
-
-            except Exception as exc:
-                st.error(f"Dataset import failed: {exc}")
-
-            finally:
-                if temporary_path and temporary_path.exists():
-                    temporary_path.unlink()
-
-    st.divider()
-    st.subheader("Latest import")
-
-    last_result = st.session_state.get("last_ingestion")
-
-    if last_result is None:
-        st.info("No dataset has been imported in this session.")
-    else:
-        st.metric(
-            "Observations stored",
-            last_result.stored_count,
-        )
-        st.metric(
-            "Storage failures",
-            last_result.storage_failure_count,
-        )
-        st.metric(
-            "Pipeline completed",
-            "Yes" if last_result.completed else "Review required",
+    elif page == "Alerts & Recommendations":
+        alerts_and_recommendations_page(
+            department_filter=selected_department_id
         )
 
-# --------------------------------------------------
+    elif page == "Action Tracking":
+        action_tracking_page(
+            department_filter=selected_department_id
+        )
+
+
+# ==========================================================
 # FOOTER
-# --------------------------------------------------
+# ==========================================================
 
 st.divider()
 
 st.caption(
-    "WardPulse is a prototype early-warning and decision-support "
-    "system. All displayed data and risk thresholds are synthetic "
-    "demonstration inputs and require operational validation "
-    "before real-world deployment."
+    "WardPulse is a prototype early-warning and "
+    "decision-support system. The demonstration uses "
+    "synthetic data and configurable indicators. "
+    "Alerts require human review and do not establish "
+    "a diagnosis, causal relationship or validated "
+    "prediction of workforce health outcomes."
 )
