@@ -1,0 +1,11 @@
+department_id,observed_at,metric,value,unit,source
+DEP-001,2026-11-08T08:00:00+00:00,staff_absence_count,4,staff absences,synthetic_demo
+DEP-001,2026-11-08T08:00:00+00:00,overtime_hours,18,hours,synthetic_demo
+DEP-001,2026-11-08T08:00:00+00:00,respiratory_case_count,5,cases,synthetic_demo
+DEP-001,2026-11-08T08:00:00+00:00,air_quality_index,115,AQI,synthetic_demo
+DEP-001,2026-11-08T08:00:00+00:00,occupational_incident_count,2,incidents,synthetic_demo
+DEP-002,2026-11-08T08:00:00+00:00,staff_absence_count,1,staff absences,synthetic_demo
+DEP-002,2026-11-08T08:00:00+00:00,overtime_hours,4,hours,synthetic_demo
+DEP-002,2026-11-08T08:00:00+00:00,respiratory_case_count,1,cases,synthetic_demo
+DEP-002,2026-11-08T08:00:00+00:00,air_quality_index,48,AQI,synthetic_demo
+DEP-002,2026-11-08T08:00:00+00:00,occupational_incident_count,0,incidents,synthetic_demo

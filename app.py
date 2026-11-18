@@ -7,6 +7,12 @@ import streamlit as st
 from pulsecore.applications.wardpulse.demo_data import create_demo_engine
 from pulsecore.applications.wardpulse.service import WardPulseSurveillance
 
+from pathlib import Path
+import tempfile
+
+from pulsecore.applications.wardpulse.ingestion import (
+    WardPulseIngestionService,
+)
 
 # --------------------------------------------------
 # PAGE CONFIGURATION
@@ -31,6 +37,8 @@ st.caption(
 def initialize_application():
     engine = create_demo_engine()
     service = WardPulseSurveillance(engine)
+    ingestion_service = WardPulseIngestionService(engine)
+    st.session_state.ingestion_service = ingestion_service
 
     report = service.run(
         baseline_start=datetime(
@@ -73,6 +81,7 @@ page = st.sidebar.radio(
         "Department Analysis",
         "Alerts and Recommendations",
         "Action Tracking",
+        "Data Ingestion",
     ],
 )
 
@@ -84,8 +93,25 @@ st.sidebar.write("Current: 1–7 November 2026")
 
 st.sidebar.divider()
 
-if st.sidebar.button("Refresh demonstration data"):
-    initialize_application()
+if st.sidebar.button("Refresh surveillance report"):
+
+    st.session_state.report = service.run(
+        baseline_start=datetime(
+            2026, 10, 25, tzinfo=timezone.utc
+        ),
+        baseline_end=datetime(
+            2026, 10, 31, 23, 59, tzinfo=timezone.utc
+        ),
+        current_start=datetime(
+            2026, 11, 1, tzinfo=timezone.utc
+        ),
+        current_end=datetime(
+            2026, 11, 7, 23, 59, tzinfo=timezone.utc
+        ),
+    )
+
+    st.success("Surveillance report recalculated.")
+
     st.rerun()
 
 st.sidebar.caption(
@@ -478,6 +504,157 @@ elif page == "Action Tracking":
         hide_index=True,
     )
 
+
+# --------------------------------------------------
+# DATA INGESTION
+# --------------------------------------------------
+elif page == "Data Ingestion":
+    st.header("Dataset Ingestion")
+    st.caption(
+        "Import departmental observations or shift records "
+        "from validated CSV and Excel files."
+    )
+
+    ingestion_type = st.selectbox(
+        "Dataset type",
+        [
+            "Departmental observations",
+            "Shift records",
+        ],
+    )
+
+    uploaded_file = st.file_uploader(
+        "Upload CSV or Excel file",
+        type=["csv", "xlsx"],
+    )
+
+    if uploaded_file is not None:
+        st.write(f"**Selected file:** {uploaded_file.name}")
+
+        if st.button("Validate and import dataset"):
+            suffix = Path(uploaded_file.name).suffix
+
+            temporary_path = None
+
+            try:
+                with tempfile.NamedTemporaryFile(
+                    delete=False,
+                    suffix=suffix,
+                ) as temporary_file:
+                    temporary_file.write(uploaded_file.getvalue())
+                    temporary_path = Path(temporary_file.name)
+
+                ingestion_service = (
+                    st.session_state.ingestion_service
+                )
+
+                if ingestion_type == "Departmental observations":
+                    result = (
+                        ingestion_service
+                        .ingest_departmental_observations(
+                            temporary_path
+                        )
+                    )
+                else:
+                    result = (
+                        ingestion_service
+                        .ingest_shift_records(
+                            temporary_path
+                        )
+                    )
+
+                st.session_state.last_ingestion = result
+
+                st.success(
+                    f"Stored {result.stored_count} observations."
+                )
+
+                if result.validation:
+                    validation_result = result.validation.result
+
+                    st.write("**Validation summary**")
+                    st.json({
+                        "valid": validation_result.valid,
+                        "total_rows": validation_result.total_rows,
+                        "accepted_rows": validation_result.accepted_rows,
+                        "rejected_rows": validation_result.rejected_rows,
+                    })
+
+                    if validation_result.issues:
+                        st.warning("Validation issues")
+                        st.dataframe([
+                            issue.model_dump()
+                            for issue in validation_result.issues
+                        ])
+
+                if result.linking:
+                    st.write("**Entity linking**")
+                    st.write(
+                        f"Linked: {result.linking.linked_count}"
+                    )
+                    st.write(
+                        f"Unmatched: {result.linking.unmatched_count}"
+                    )
+
+                    if result.linking.issues:
+                        st.dataframe([
+                            issue.__dict__
+                            for issue in result.linking.issues
+                        ])
+
+                if result.generation:
+                    st.write("**Observation generation**")
+                    st.write(
+                        f"Generated: {result.generation.generated_count}"
+                    )
+
+                    if result.generation.issues:
+                        st.dataframe([
+                            issue.__dict__
+                            for issue in result.generation.issues
+                        ])
+
+                if result.storage_issues:
+                    st.error("Some observations could not be stored.")
+                    st.dataframe([
+                        issue.__dict__
+                        for issue in result.storage_issues
+                    ])
+
+                if result.stored_count:
+                    st.info(
+                        "The imported observations are now in the "
+                        "current in-memory PulseCore engine. Rerun "
+                        "surveillance to update the report."
+                    )
+
+            except Exception as exc:
+                st.error(f"Dataset import failed: {exc}")
+
+            finally:
+                if temporary_path and temporary_path.exists():
+                    temporary_path.unlink()
+
+    st.divider()
+    st.subheader("Latest import")
+
+    last_result = st.session_state.get("last_ingestion")
+
+    if last_result is None:
+        st.info("No dataset has been imported in this session.")
+    else:
+        st.metric(
+            "Observations stored",
+            last_result.stored_count,
+        )
+        st.metric(
+            "Storage failures",
+            last_result.storage_failure_count,
+        )
+        st.metric(
+            "Pipeline completed",
+            "Yes" if last_result.completed else "Review required",
+        )
 
 # --------------------------------------------------
 # FOOTER

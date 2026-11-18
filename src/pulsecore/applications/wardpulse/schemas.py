@@ -33,8 +33,10 @@ class DepartmentSchema(BaseModel):
             entity_type="department",
             name=self.name,
             attributes={
-                "facility_id": self.facility_id
+                "facility_id": self.facility_id,
+                "department_id": self.id,
             }
+
         )
 
 

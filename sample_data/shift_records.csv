@@ -1,0 +1,4 @@
+shift_id,employee_id,department_id,shift_date,scheduled_hours,worked_hours,overtime_hours,shift_type
+SH-001,EMP-001,DEP-001,2026-11-08T08:00:00+00:00,8,12,4,day
+SH-002,EMP-002,DEP-001,2026-11-08T08:00:00+00:00,8,11,3,night
+SH-003,EMP-003,DEP-002,2026-11-08T08:00:00+00:00,8,8,0,day
