@@ -1,11 +1,19 @@
 
-
-from datetime import datetime, timezone, time as datetime_time
-from uuid import uuid4
+from pathlib import Path
+import sys
+from datetime import datetime, timezone
 
 import pandas as pd
 import streamlit as st
 
+# Make the src directory discoverable by Python
+ROOT_DIR = Path(__file__).resolve().parent
+SRC_DIR = ROOT_DIR / "src"
+
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+# PulseCore imports
 from pulsecore.applications.wardpulse.demo_data import create_demo_engine
 from pulsecore.applications.wardpulse.service import WardPulseSurveillance
 from pulsecore.domain.models import Observation
